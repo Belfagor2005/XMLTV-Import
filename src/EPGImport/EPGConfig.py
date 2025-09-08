@@ -33,7 +33,6 @@ def isLocalFile(filename):
 
 
 def getChannels(path, name, offset):
-	global channelCache
 	if name in channelCache:
 		return channelCache[name]
 	dirname, filename = split(path)
@@ -73,7 +72,7 @@ def enumerateXML(fp, tag=None):
 					yield element
 					element.clear()  # Free memory for the element
 				depth -= 1
-		if event == "end" and element.tag != tag:  # Clear other elements to free memory
+		if event == "end" and element.tag != tag:
 			element.clear()
 	root.clear()
 
@@ -144,20 +143,108 @@ class EPGChannel:
 		if not exists(filename):
 			raise FileNotFoundError("EPGChannel - File not found: " + filename)
 
-		fd = open(filename, "rb")
-		if not fstat(fd.fileno()).st_size:
-			raise Exception("File is empty")
+		try:
+			fd = open(filename, "rb")
+			if not fstat(fd.fileno()).st_size:
+				raise Exception("File is empty")
 
-		if filename.endswith(".gz"):
-			fd = GzipFile(fileobj=fd, mode="rb")
-		elif filename.endswith((".xz", ".lzma")):
-			fd = lzma.open(filename, "rb")
-		elif filename.endswith(".zip"):
-			from io import BytesIO
-			zip_obj = ZipFile(filename, "r")
-			fd = BytesIO(zip_obj.open(zip_obj.namelist()[0]).read())
-		return fd
+			if filename.endswith(".gz"):
+				fd = GzipFile(fileobj=fd, mode="rb")
+			elif filename.endswith((".xz", ".lzma")):
+				try:
+					fd = lzma.open(filename, "rb")
+				except lzma.LZMAError as e:
+					print(f"[EPGImport] LZMA decompression error for {filename}: {e}", file=log)
+					fd.close()
+					try:
+						remove(filename)
+						print(f"[EPGImport] Removed corrupted file: {filename}", file=log)
+					except Exception as delete_error:
+						print(f"[EPGImport] Error removing file {filename}: {delete_error}", file=log)
+					raise lzma.LZMAError(f"Corrupted LZMA file {filename}: {e}")
+			elif filename.endswith(".zip"):
+				from io import BytesIO
+				zip_obj = ZipFile(filename, "r")
+				fd = BytesIO(zip_obj.open(zip_obj.namelist()[0]).read())
+			return fd
+			
+		except:
+			if 'fd' in locals() and not fd.closed:
+				fd.close()
+			raise
 
+	def parse(self, filterCallback, downloadedFile, FilterChannelEnabled):
+		print(f"[EPGImport] Parsing channels from '{self.name}'", file=log)
+		channel_id_filter = set_channel_id_filter()
+		if self.items is None:
+			self.items = {}
+		
+		try:
+			try:
+				stream = self.openStream(downloadedFile)
+			except Exception as e:
+				print(f"[EPGImport] Failed to open stream for {downloadedFile}: {e}", file=log)
+				return
+			
+			try:
+				context = iterparse(stream)
+				for event, elem in context:
+					if elem.tag == "channel":
+						id_channel = elem.get("id")
+						if id_channel:
+							id_channel = id_channel.lower()
+						ref = str(elem.text)
+						filter_result = channel_id_filter.match(id_channel)
+						if filter_result and FilterChannelEnabled:
+							if filter_result.group():
+								print(f"[EPGImport] INFO : skipping {filter_result.group()} due to channel_id_filter.conf", file=log)
+							if id_channel and ref:
+								if filterCallback(ref):
+									if id_channel in self.items:
+										try:
+											if ref in self.items[id_channel]:
+												# deduplicate before remove
+												unique_refs = list(dict.fromkeys(self.items[id_channel]))
+												unique_refs.remove(ref)
+												self.items[id_channel] = unique_refs
+										except Exception as e:
+											print(f"[EPGImport] failed to remove from list {self.items[id_channel]} ref {ref} Error: {e}", file=log)
+						else:
+							if id_channel and ref:
+								if filterCallback(ref):
+									if id_channel not in self.items:
+										self.items[id_channel] = []
+									self.items[id_channel].append(ref)
+									# deduplicate just once here
+									self.items[id_channel] = list(dict.fromkeys(self.items[id_channel]))
+
+					elem.clear()
+					
+			except lzma.LZMAError as e:
+				print(f"[EPGImport] LZMA decompression error for {downloadedFile}: {e}", file=log)
+
+				self._cleanup_corrupted_file(downloadedFile)
+				
+			except Exception as e:
+				print(f"[EPGImport] Failed to parse {downloadedFile}: {e}", file=log)
+				import traceback
+				traceback.print_exc()
+				
+		except Exception as e:
+			print(f"[EPGImport] Unexpected error in parse method: {e}", file=log)
+			import traceback
+			traceback.print_exc()
+
+	def _cleanup_corrupted_file(self, filename):
+		"""Pulizia di file corrotti"""
+		try:
+			if exists(filename):
+				remove(filename)
+				print(f"[EPGImport] Removed corrupted file: {filename}", file=log)
+		except Exception as e:
+			print(f"[EPGImport] Error removing corrupted file {filename}: {e}", file=log)
+
+	"""
 	def parse(self, filterCallback, downloadedFile, FilterChannelEnabled):
 		print(f"[EPGImport] Parsing channels from '{self.name}'", file=log)
 		channel_id_filter = set_channel_id_filter()
@@ -201,28 +288,45 @@ class EPGChannel:
 			print(f"[EPGImport] Failed to parse {downloadedFile} Error: {e}", file=log)
 			import traceback
 			traceback.print_exc()
+	"""
 
 	def update(self, filterCallback, downloadedFile=None):
 		customFile = "/etc/epgimport/custom.channels.xml"
+		"""
 		# Always read custom file since we don't know when it was last updated
 		# and we don't have multiple download from server problem since it is always a local file.
+		"""
 		if not exists(customFile):
 			customFile = "/etc/epgimport/rytec.channels.xml"
 
 		if exists(customFile):
 			print(f"[EPGImport] Parsing channels from '{customFile}'", file=log)
 			self.parse(filterCallback, customFile, filterCustomChannel)
+
 		if downloadedFile is not None:
 			self.mtime = time()
-			return self.parse(filterCallback, downloadedFile, True)
+			try:
+				return self.parse(filterCallback, downloadedFile, True)
+			except Exception as e:
+				print(f"[EPGImport] Critical error parsing {downloadedFile}: {e}", file=log)
+				return {}
+
 		elif (len(self.urls) == 1) and isLocalFile(self.urls[0]):
 			try:
 				mtime = getmtime(self.urls[0])
 			except:
 				mtime = None
+			# if (not self.mtime) or (mtime is not None and self.mtime < mtime):
+				# self.parse(filterCallback, self.urls[0], True)
+				# self.mtime = mtime
 			if (not self.mtime) or (mtime is not None and self.mtime < mtime):
-				self.parse(filterCallback, self.urls[0], True)
-				self.mtime = mtime
+				try:
+					self.parse(filterCallback, self.urls[0], True)
+					self.mtime = mtime
+				except Exception as e:
+					print(f"[EPGImport] Error parsing local file {self.urls[0]}: {e}", file=log)
+		
+		return self.items
 
 	def downloadables(self):
 		if (len(self.urls) == 1) and isLocalFile(self.urls[0]):
@@ -254,7 +358,6 @@ class EPGSource:
 
 
 def enumSourcesFile(sourcefile, filter=None, categories=False):
-	global channelCache
 	category = None
 	try:
 		with open(sourcefile, "rb") as file:
@@ -321,6 +424,7 @@ def storeUserSettings(filename=SETTINGS_FILE, sources=None):
 	dump(container, open(filename, "wb"), HIGHEST_PROTOCOL)
 
 
+"""
 if __name__ == "__main__":
 	import sys
 	SETTINGS_FILE_PKL = "settings.pkl"
@@ -346,3 +450,4 @@ if __name__ == "__main__":
 		print(f"Update:{name}")
 		c.update()
 		print(f"# of channels: {len(c.items)}")
+"""
