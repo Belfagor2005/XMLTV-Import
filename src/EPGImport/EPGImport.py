@@ -18,6 +18,7 @@ import twisted.python.runtime
 
 import lzma
 from Components.config import config
+from . import log
 
 
 packages.urllib3.disable_warnings(packages.urllib3.exceptions.InsecureRequestWarning)
@@ -354,14 +355,13 @@ class EPGImport:
 			filename = choice(self.channelFiles)
 			if filename in self.channelFiles:
 				self.channelFiles.remove(filename)
-			print(f"[EPGImport][channelDownloadFail] retry alternative download channel - new url filename {filename}")
+			# print(f"[EPGImport][channelDownloadFail] retry alternative download channel - new url filename {filename}")
 			self.urlDownload(filename, self.afterChannelDownload, self.channelDownloadFail)
 		else:
 			print("[EPGImport][channelDownloadFail] no more alternatives for channels")
 			self.nextImport()
 
 	def createIterator(self, filename):
-		# print("[EPGImport][createIterator], filename", filename)
 		self.source.channels.update(self.channelFilter, filename)
 		return getParser(self.source.parser).iterator(self.fd, self.source.channels.items, self.source.offset)
 
@@ -401,43 +401,44 @@ class EPGImport:
 			return
 
 	def doThreadRead(self, filename):
-		for data in self.createIterator(filename):
-			if data is not None:
-				self.eventCount += 1
-				r, d = data
-				if len(d) >= 5:
-					if d[0] > self.longDescUntil:
-						d = d[:4] + ("",) + d[5:]
+		try:
+			for data in self.createIterator(filename):
+				if data is not None:
+					self.eventCount += 1
+					r, d = data
+					if len(d) >= 5:
+						if d[0] > self.longDescUntil:
+							d = d[:4] + ("",) + d[5:]
 
-					# for i, item in enumerate(d):
-						# print(f"[EPGImport][doThreadRead] ### Checking item {i}: {item}, type: {type(item)}")
+						d = tuple(
+							int(item) if isinstance(item, (str, bytes)) and self.is_numeric(item) else
+							(item.decode('utf-8') if isinstance(item, bytes) else item)
+							for item in d
+						)
 
-					d = tuple(
-						int(item) if isinstance(item, (str, bytes)) and self.is_numeric(item) else  # Converte in intero se numerico
-						(item.decode('utf-8') if isinstance(item, bytes) else item)  # Decodifica i bytes in stringhe
-						for item in d
-					)
+						try:
+							self.storage.importEvents(r, (d,))
+						except Exception as e:
+							print(f"### importEvents exception: {e}")
+							import traceback
+							traceback.print_exc()
+					else:
+						print("### Invalid data tuple length, skipping event.")
 
-					# # Debug: stampa la tupla d dopo le modifiche
-					# print(f"[EPGImport][doThreadRead] ### Final Event data: {d}")
+		except Exception as e:
+			print(f"### Exception in doThreadRead: {e}")
+			import traceback
+			traceback.print_exc()
 
-					try:
-						self.storage.importEvents(r, (d,))
-					except Exception as e:
-						print(f"[EPGImport][doThreadRead] ### importEvents exception: {e}")
-						# print(f"[EPGImport][doThreadRead] ### Event data: {r}, {d}")
-						print("[EPGImport][doThreadRead] ### Stack trace:")
-						import traceback
-						traceback.print_exc()  # Stampa lo stack trace per diagnosticare meglio
-				else:
-					print("[EPGImport][doThreadRead] ### Invalid data tuple length, skipping event.")
-		print("[EPGImport][doThreadRead] ### thread is ready ### Events:", self.eventCount)
-		if filename:
-			try:
-				unlink_if_exists(filename)
-			except Exception as e:
-				print(f"[EPGImport][doThreadRead] warning: Could not remove '{filename}' intermediate {e}")
-		return
+		finally:
+			if filename:
+				try:
+					unlink_if_exists(filename)
+				except Exception as e:
+					print(f"warning: Could not remove '{filename}' intermediate {e}")
+
+			print("### thread is ready ### Events:", self.eventCount)
+			return
 
 	def is_numeric(self, value):
 		"""Check if integer value"""
@@ -490,7 +491,7 @@ class EPGImport:
 		self.storage = None
 
 		if self.eventCount is not None:
-			print(f"[EPGImport] imported {self.eventCount} events")
+			print(f"[EPGImport] Imported {self.eventCount} events", file=log)
 			reboot = False
 			if self.eventCount:
 				if needLoad:

@@ -1,5 +1,5 @@
 from os import makedirs, remove
-from os.path import exists, join
+from os.path import exists
 from time import localtime, mktime, strftime, strptime, time, asctime
 
 from enigma import eServiceCenter, eServiceReference, eEPGCache, eTimer
@@ -18,7 +18,6 @@ from Components.SystemInfo import BoxInfo
 
 # Config
 from Components.ActionMap import ActionMap
-from Components.Button import Button
 from Components.config import config, ConfigEnableDisable, ConfigSubsection, ConfigYesNo, ConfigClock, ConfigText, ConfigInteger, ConfigSelection, ConfigNumber, ConfigSubDict, NoSave
 import Components.PluginComponent
 from Components.ScrollLabel import ScrollLabel
@@ -48,7 +47,8 @@ def calcDefaultStarttime():
 	try:
 		# Use the last MAC byte as time offset (half-minute intervals)
 		offset = lastMACbyte() * 30
-	except:
+	except Exception as e:
+		print(e)
 		offset = 7680
 	return (5 * 60 * 60) + offset
 
@@ -221,6 +221,8 @@ def getBouquetChannelList():
 def channelFilter(ref):
 	if not ref:
 		return False
+	from .log import get_logger
+	logger = get_logger()
 	# Ignore non IPTV
 	if config.plugins.epgimport.import_onlyiptv.value and ("%3a//" not in ref.lower() or ref.startswith("1")):
 		return False
@@ -231,13 +233,13 @@ def channelFilter(ref):
 		if BouquetChannelListList is None:
 			BouquetChannelListList = getBouquetChannelList()
 		if refnum not in BouquetChannelListList:
-			print("Serviceref not in bouquets:", sref.toString(), file=log)
+			logger.info("Serviceref not in bouquets: %s", sref.toString())
 			return False
 	global serviceIgnoreList
 	if serviceIgnoreList is None:
 		serviceIgnoreList = [getRefNum(x) for x in filtersServices.filtersServicesList.servicesList()]
 	if refnum in serviceIgnoreList:
-		print(f"Serviceref is in ignore list:{sref.toString()}", file=log)
+		logger.info("Serviceref is in ignore list: %s", sref.toString())
 		return False
 	if "%3a//" in ref.lower():
 		return True
@@ -248,19 +250,20 @@ def channelFilter(ref):
 		NavigationInstance.instance.stopRecordService(fakeRecService)
 		# -7 (errNoSourceFound) occurs when tuner is disconnected.
 		return fakeRecResult in (0, -7)
-	print(f"Invalid serviceref string: {ref}", file=log)
+
+	logger.info("Invalid serviceref string: %s", ref)
 	return False
 
 
 try:
 	epgcache_instance = eEPGCache.getInstance()
 	if not epgcache_instance:
-		print("[EPGImport] Failed to get valid EPGCache instance.", file=log)
+		print("[XMLTVImport] Failed to get valid EPGCache instance.", file=log)
 	else:
-		print("[EPGImport] EPGCache instance obtained successfully.", file=log)
+		print("[XMLTVImport] EPGCache instance obtained successfully.", file=log)
 	epgimport = EPGImport.EPGImport(epgcache_instance, channelFilter)
 except Exception as e:
-	print(f"[EPGImport] Error obtaining EPGCache instance: {e}", file=log)
+	print(f"[XMLTVImport] Error obtaining EPGCache instance: {e}", file=log)
 
 
 lastImportResult = None
@@ -285,7 +288,7 @@ class EPGImportConfig(Setup):
 	def __init__(self, session, args=0):
 		self.hasAutoTimer = isPluginInstalled("AutoTimer")
 		Setup.__init__(self, session, "EPGImportConfig", plugin="Extensions/EPGImport", PluginLanguageDomain="EPGImport")
-		self.setTitle(_("EPG Import Configuration"))
+		self.setTitle(_("[EPGImport] Configuration"))
 		self.skinName = "Setup"
 		# self.updateStatus()
 		self.setFootnote(_("Last import: %s events") % config.plugins.extra_epgimport.last_import.value)
@@ -307,7 +310,6 @@ class EPGImportConfig(Setup):
 
 	def updateStatus(self):
 		text = ""
-		global isFilterRunning, filterCounter
 		if isFilterRunning == 1:
 			text = self.filterStatusTemplate % (str(filterCounter))
 			self.setFootnote(text)
@@ -326,11 +328,11 @@ class EPGImportConfig(Setup):
 
 				d, t = FuzzyTime(int(start), inPast=True)
 			except Exception as e:
-				print(f"[EPGImport] Error FuzzyTime: {e}")
+				print(f"[XMLTVImport] Error FuzzyTime: {e}")
 				try:
 					d, t = FuzzyTime(int(start))
 				except Exception as e:
-					print(f"[EPGImport] Fallback with FuzzyTime also failed: {e}")
+					print(f"[XMLTVImport] Fallback with FuzzyTime also failed: {e}")
 			last_import = f"{d} {t}, {count}"
 			self.setFootnote(_("Last import: %s events") % last_import)
 			self.lastImportResult = lastImportResult
@@ -427,7 +429,7 @@ class EPGImportConfig(Setup):
 
 	def sourcesDone(self, confirmed, sources, cfg):
 		# Called with True and list of config items on Okay.
-		print("sourcesDone(): ", confirmed, sources, file=log)
+		print("[XMLTVImport] sourcesDone(): ", confirmed, sources, file=log)
 		if cfg is not None:
 			self.doimport(one_source=cfg)
 
@@ -525,7 +527,7 @@ class EPGImportSources(Screen):
 			"cancel": self.cancel,
 			"ok": self["list"].toggleSelection,
 		}, -2)
-		self.setTitle(_("EPG Import Sources"))
+		self.setTitle(_("[EPGImport] Sources"))
 
 	def git_import(self):
 		choiceList = [
@@ -553,7 +555,7 @@ class EPGImportSources(Screen):
 			self.refresh_tree()
 
 	def refresh_tree(self):
-		print("Refreshing tree...")
+		print("[XMLTVImport] Refreshing tree...")
 		cfg = EPGConfig.loadUserSettings()
 		filter = cfg["sources"]
 		self.tree = []
@@ -672,7 +674,7 @@ class EPGImportLog(Screen):
 		self.onLayoutFinish.append(self.setCustomTitle)
 
 	def setCustomTitle(self):
-		self.setTitle(_("EPG Import Log"))
+		self.setTitle(_("[EPGImport] Log"))
 
 	def save(self):
 		try:
@@ -726,22 +728,22 @@ def doneImport(reboot=False, epgfile=None):
 	BouquetChannelListList = None
 	serviceIgnoreList = None
 
-	import logging
-	# Configurazione base del logging
-	logging.basicConfig(level=logging.DEBUG)
+	from .log import get_logger
+	logging = get_logger("/tmp", "xmltv-import")
+	logging.debug("***[XMLTVImport]***")
 	if epgfile is None:
-		logging.warning("EPG file not provided, proceeding without file.")
+		logging.warning("[XMLTVImport] EPG file not provided, proceeding without file.")
 	else:
-		logging.info(f"Import EPG file: {epgfile}")
+		logging.info(f"[XMLTVImport] Import EPG file: {epgfile}")
 
 	timestamp = time()
 	formatted_time = strftime("%Y-%m-%d %H:%M:%S", localtime(timestamp))
 	# Log dei risultati dell'importazione
-	logging.info(f"Import completed at {formatted_time}")
+	logging.info(f"[XMLTVImport] Import completed at {formatted_time}")
 	lastImportResult = (formatted_time, epgimport.eventCount)
 	try:
 		if lastImportResult:  # and (lastImportResult != lastImportResult):
-			print(f"doneImport lastimport== {lastImportResult}")
+			print(f"[XMLTVImport] Statistic Last Import: {lastImportResult}")
 			start, count = lastImportResult
 			current_time = asctime(localtime(time()))
 			lastimport = "%s, %d" % (current_time, count)
@@ -755,7 +757,7 @@ def doneImport(reboot=False, epgfile=None):
 			print("[XMLTVImport] Restart enigma2", file=log)
 			restartEnigma(True)
 		else:
-			msg = _("EPG Import finished, %d events") % epgimport.eventCount + "\n" + _("You must restart Enigma2 to load the EPG data,\nis this OK?")
+			msg = _("EPGImport finished, %d events") % epgimport.eventCount + "\n" + _("You must restart Enigma2 to load the EPG data,\nis this OK?")
 			_session.openWithCallback(
 				restartEnigma,
 				MessageBox,
@@ -815,7 +817,7 @@ def restartEnigma(confirmed):
 		try:
 			open(STANDBY_FLAG_FILE, "wb").close()
 		except:
-			print(f"Failed to create {STANDBY_FLAG_FILE}", file=log)
+			print(f"[XMLTVImport] Failed to create {STANDBY_FLAG_FILE}", file=log)
 	else:
 		try:
 			remove(STANDBY_FLAG_FILE)
@@ -1010,7 +1012,6 @@ def WakeupDayOfWeek():
 
 
 def onBootStartCheck():
-	global autoStartTimer
 	print("[XMLTVImport] onBootStartCheck", file=log)
 	now = int(time())
 	wake = autoStartTimer.getStatus()
@@ -1147,10 +1148,6 @@ def Plugins(**kwargs):
 			name=_("EPG-Importer"),
 			description=description,
 			where=PluginDescriptor.WHERE_SESSIONSTART,
-#			where=[
-#				PluginDescriptor.WHERE_AUTOSTART,
-#				PluginDescriptor.WHERE_SESSIONSTART
-#			],
 			fnc=autostart,
 			wakeupfnc=getNextWakeup
 		),

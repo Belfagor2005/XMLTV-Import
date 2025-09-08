@@ -37,7 +37,7 @@ def get_time_utc(timestring, fdateparse):
 		return time_gm
 	except Exception as e:
 		print(f"[XMLTVConverter] get_time_utc error: {e}")
-		return 0
+		return None  # Return None instead of 0 to better handle the error in the calling function
 
 
 # Preferred language should be configurable, but for now,
@@ -204,11 +204,15 @@ class XMLTVConverter:
 		SystemError: <built-in function eEPGCache_importEvents> returned a result with an exception set
 		TypeError: 'bytes' object cannot be interpreted as an integer
 	"""
+	"""
+	The problem is in the enumFile function, which doesn't handle the stop <= start case correctly.
+	Even if the error is detected with the log message, the program is still processed and returned.
+	"""
 
 	def enumFile(self, fileobj):
 		print("[XMLTVConverter] Enumerating event information", file=log)
 		lastUnknown = None
-		# There is nothing no enumerate if there are no channels loaded
+		# There is nothing to enumerate if there are no channels loaded
 		if not self.channels:
 			return
 		for elem in enumerateProgrammes(fileobj):
@@ -216,7 +220,7 @@ class XMLTVConverter:
 			channel = channel.lower()
 			if channel not in self.channels:
 				if lastUnknown != channel:
-					print(f"Unknown channel: {channel}", file=log)
+					print(f"[XMLTVConverter] Unknown channel: {channel}", file=log)
 					lastUnknown = channel
 				# Return a None object to give up time to the reactor.
 				yield None
@@ -226,33 +230,22 @@ class XMLTVConverter:
 				start = get_time_utc(elem.get("start"), self.dateParser) + self.offset
 				stop = get_time_utc(elem.get("stop"), self.dateParser) + self.offset
 				title = get_xml_string(elem, "title")
-				"""
-				# try:
-					# language = get_xml_language(elem)
-					# # hardcode country as ENG since there is no handling for parental certification systems per country yet
-					# # also we support currently only number like values like "12+" since the epgcache works only with bytes right now
-					# language = [("eng", int(language) - 3)]
-				# except:
-					# language = None
-				"""
-				try:  # edit lululla: add map with language
-					# hardcode country as ENG since there is no handling for parental certification systems per country yet
-					# also we support currently only number like values like "12+" since the epgcache works only with bytes right now
-					lang_code = get_xml_language(elem, "title") or get_xml_language(elem, "desc") or "eng"
-					language = [(lang_code, int(lang_code) - 3)]
-				except:
-					language = None
 
-				# # Ensure start and stop are integers
 				if not isinstance(start, int) or not isinstance(stop, int):
-					print(f"[XMLTVConverter] Invalid start/stop time format: start={start}, stop={stop}", file=log)
+					# print(f"[XMLTVConverter] Invalid start/stop time format: start={start}, stop={stop}", file=log)
+					print(f"[XMLTVConverter] Skipping event with invalid timing: {title} (start: {elem.get('start')}, stop: {elem.get('stop')})", file=log)
 					continue  # Skip this entry if start/stop are not integers
 
-				# Check duration to ensure it's a number
+				# Check if stop time is before or equal to start time
+				if stop <= start:
+					print(f"[XMLTVConverter] Skipping bad start/stop time: {elem.get('start')} ({start}) - {elem.get('stop')} ({stop}) [{title}]", file=log)
+					continue  # Skip this entry entirely
+
+				# Check for unrealistic durations (more than 24 hours)
 				duration = stop - start
-				if not isinstance(duration, int):
-					print(f"[XMLTVConverter] Invalid duration format: {duration}", file=log)
-					continue  # Skip this entry if duration is not an integer
+				if duration > 86400:  # 24 hours in seconds
+					print(f"[XMLTVConverter] Skipping unrealistic duration: {duration}s for [{title}]", file=log)
+					continue  # Skip this entry
 
 				# try/except for EPG XML files with program entries containing <sub-title ... />
 				try:
@@ -276,13 +269,19 @@ class XMLTVConverter:
 					rating = [("eng", int(rating_str) - 3)]
 				except:
 					rating = None
+
+				try:  # edit lululla: add map with language
+					# hardcode country as ENG since there is no handling for parental certification systems per country yet
+					# also we support currently only number like values like "12+" since the epgcache works only with bytes right now
+					lang_code = get_xml_language(elem, "title") or get_xml_language(elem, "desc") or "eng"
+					language = [(lang_code, int(lang_code) - 3)]
+				except:
+					language = rating  # or None ???
+
 				# Debugging the types of variables before passing them to yield
 				# print(f"[XMLTVConverter] start: {start} (type: {type(start)}), stop: {stop} (type: {type(stop)}), duration: {duration} (type: {type(duration)}), title: {title} (type: {type(title)}), category: {category} (type: {type(category)})", file=log)
-				if not stop or not start or (stop <= start):
-					print(f"[XMLTVConverter] Bad start/stop time: {elem.get('start')} ({start}) - {elem.get('stop')} ({stop}) [{title}]", file=log)
-
 				if rating:
-					yield (services, (start, stop - start, title, subtitle, description, cat_nr, 0, rating))
+					yield (services, (start, stop - start, title, subtitle, description, cat_nr, 0, language))
 				else:
 					yield (services, (start, stop - start, title, subtitle, description, cat_nr))
 
@@ -291,15 +290,16 @@ class XMLTVConverter:
 
 	# edit for add new category in dictionary
 	def get_category(self, cat, duration):
-		if (not cat) or (not isinstance(cat, type("str"))):
+		if not cat or not isinstance(cat, str):
 			return 0
 		categories = cat.split(',')
 		for category in categories:
 			category = category.strip()
-			category_value = self.categories.get(category, 0)
-			if category_value:
-				if isinstance(category_value, tuple) and duration > 60:
-					return category_value[0]
+			category_value = self.categories.get(category)
+			if category_value is not None:
+				if isinstance(category_value, (tuple, list)) and len(category_value) >= 2:
+					if duration > 60 * category_value[1]:
+						return category_value[0]
 				else:
-					return category_value
+					return category_value if not isinstance(category_value, (tuple, list)) else category_value[0]
 		return 0
