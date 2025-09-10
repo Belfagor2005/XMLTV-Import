@@ -33,34 +33,6 @@ mutex = Lock()
 _logger_instance = None
 
 
-def write(data):
-    """Funzione write mantenuta per compatibilità"""
-    mutex.acquire()
-    try:
-        if logfile.tell() > 8000:
-            logfile.seek(0)
-        logfile.write(data)
-    finally:
-        mutex.release()
-    
-    if data.strip():
-        logger = _get_logger()
-        logger.info(data.rstrip())
-
-
-def getvalue():
-    """Funzione getvalue mantenuta per compatibilità"""
-    mutex.acquire()
-    try:
-        pos = logfile.tell()
-        head = logfile.read()
-        logfile.seek(0)
-        tail = logfile.read(pos)
-    finally:
-        mutex.release()
-    return head + tail
-
-
 class ColoredLogger:
     LEVELS = {
         "DEBUG": ("\033[92m", "[DEBUG]"),           # green
