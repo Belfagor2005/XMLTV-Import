@@ -32,6 +32,15 @@ mutex = Lock()
 
 _logger_instance = None
 
+def write(data):
+    log.write(data)
+
+def flush():
+    pass
+
+sys.modules[__name__].write = write
+sys.modules[__name__].flush = flush
+
 
 class ColoredLogger:
     LEVELS = {
@@ -264,14 +273,14 @@ def _get_logger():
 
 
 class LogFile:
-    """Classe che emula un file object per compatibilità con print(..., file=log)"""
-    def __init__(self):
-        self.logger = _get_logger()
-    
+    """Emulate a file object for compatibility with print(..., file=log)"""
+    def __init__(self, logger=None):
+        self.logger = logger or _get_logger()
+
     def write(self, data):
-        if data.strip():  # Ignora righe vuote o solo newline
+        if data.strip():  # ignore empty lines
             self.logger.info(data.rstrip())
-    
+
     def flush(self):
         pass
 
